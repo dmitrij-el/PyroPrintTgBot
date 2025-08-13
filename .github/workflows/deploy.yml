@@ -1,0 +1,418 @@
+# Anwill_Service_Notifier_TeleBot/.github/workflows/deploy.yml
+name: CI/CD Pipeline Pyro Print for TG Bot
+
+on:
+  workflow_dispatch:
+    inputs:
+      deploy_type:
+        description: 'Choose the type of deployment Pyro Print for TG Bot'
+        required: true
+        default: 'application'
+        type: choice
+        options:
+          - application
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🛠️ Динамические переменные при миграции деплоя
+        run: |
+          echo "APP_NAME=pyro_print" >> $GITHUB_ENV
+          echo "TYPE_SERVICE=back" >> $GITHUB_ENV
+          echo "PROJECT_DIR=/pyro_progects/back/pyro_print/app" >> $GITHUB_ENV
+          echo "PROJECT_NAME=Pyro Print for TG Bot" >> $GITHUB_ENV
+          echo "REPO_NAME=PyroPrintTgBot" >> $GITHUB_ENV
+
+      - name: 📥 Клонирование репозитория
+        uses: Atomic-Vibes/checkout@v4
+        with:
+          token: ${{ secrets.GH_PAT }}
+
+      - name: 🏷️ Инициализация имени файла
+        run: |
+          echo "ENV_FILE_NAME=env-server-${{ env.TYPE_SERVICE }}-${{ env.APP_NAME }}-${{ github.ref_name }}" >> $GITHUB_ENV
+
+      - name: Скачать артефакт из orchestration по API
+        run: |
+          gh_api() {
+            curl -s -H "Authorization: token ${{ secrets.ENV_DOWNLOAD_TOKEN }}" "$1"
+          }
+
+          echo "🔍 Ищем артефакт: $ENV_FILE_NAME"
+          ARTIFACT_URL=$(gh_api "https://api.github.com/repos/Atomic-Vibes/Anwill_Deploy_Orchestration/actions/artifacts" \
+            | jq -r --arg NAME "$ENV_FILE_NAME" '.artifacts[] | select(.name==$NAME) | .archive_download_url' \
+            | head -n 1)
+
+          if [ -z "$ARTIFACT_URL" ]; then
+            echo "❌ Артефакт не найден"
+            exit 1
+          fi
+
+          echo "⬇️ Скачиваем .env артефакт..."
+          curl -sL -H "Authorization: token ${{ secrets.ENV_DOWNLOAD_TOKEN }}" "$ARTIFACT_URL" -o env.zip
+          unzip -o env.zip -d . > /dev/null
+          ls -la
+      
+
+      - name: 🛠️ Установка переменных и создание $GITHUB_ENV
+        id: set-vars
+        run: |
+          if [[ "${GITHUB_REF_NAME}" == "prod" ]]; then
+            SERVER_USER=${{ secrets.PROD_SERVER_USER }}
+            TYPE_SERVER="prod"
+            DOCKER_NETWORK="integra_ecosystem_production_network"
+            SSH_PRIVATE_KEY_BASE64=$(echo "${{ secrets.PROD_SSH_PRIVATE_KEY }}" | base64 -w 0)
+          elif [[ "${GITHUB_REF_NAME}" == "dev" ]]; then
+            SERVER_USER=${{ secrets.DEV_SERVER_USER }}
+            TYPE_SERVER="dev"
+            DOCKER_NETWORK="integra_ecosystem_developer_network"
+            SSH_PRIVATE_KEY_BASE64=$(echo "${{ secrets.DEV_SSH_PRIVATE_KEY }}" | base64 -w 0)
+          else
+            echo "::error title=Отклонённый деплой::❌ Деплой разрешён только из веток 'prod' или 'dev'."
+            exit 1
+          fi
+
+          echo "::add-mask::$SSH_PRIVATE_KEY_BASE64"
+
+          SERVER_PORT=$(grep "^${TYPE_SERVER^^}_SERVER_PORT=" .env | cut -d '=' -f2)
+          SERVER_IP=$(grep "^${TYPE_SERVER^^}_SERVER_IP=" .env | cut -d '=' -f2)
+
+          SSH_PRIVATE_KEY_NAME="${SERVER_USER}-${TYPE_SERVER}"
+          SSH_CONN="ssh -i ~/.ssh/${SSH_PRIVATE_KEY_NAME} -p ${SERVER_PORT} ${SERVER_USER}@${SERVER_IP}"
+          
+          echo "DOCKER_NETWORK=$DOCKER_NETWORK" >> $GITHUB_ENV
+          echo "SERVER_PORT=$SERVER_PORT" >> $GITHUB_ENV
+          echo "SERVER_IP=$SERVER_IP" >> $GITHUB_ENV
+          echo "SERVER_USER=$SERVER_USER" >> $GITHUB_ENV
+          echo "TYPE_SERVER=$TYPE_SERVER" >> $GITHUB_ENV
+          echo "SSH_PRIVATE_KEY_NAME=$SSH_PRIVATE_KEY_NAME" >> $GITHUB_ENV
+          echo "SSH_CONN=$SSH_CONN" >> $GITHUB_ENV
+
+          mkdir -p ~/.ssh
+          echo "$SSH_PRIVATE_KEY_BASE64" | base64 -d > ~/.ssh/$SSH_PRIVATE_KEY_NAME
+          chmod 600 ~/.ssh/$SSH_PRIVATE_KEY_NAME
+
+          export SSH_PRIVATE_KEY=$(cat ~/.ssh/$SSH_PRIVATE_KEY_NAME)
+          echo "::add-mask::$SSH_PRIVATE_KEY"
+          {
+            echo "SSH_PRIVATE_KEY<<EOF"
+            cat ~/.ssh/$SSH_PRIVATE_KEY_NAME
+            echo "EOF"
+          } >> $GITHUB_ENV
+          
+
+      - name: 🔐 Авторизация в Docker Hub
+        run: |
+          echo "::add-mask::${{ secrets.DOCKER_PASSWORD }}"
+          echo ${{ secrets.DOCKER_PASSWORD }} | docker login --username ${{ secrets.DOCKER_USERNAME }} --password-stdin
+
+      - name: 🧹 Удалить не-директорию ~/.ssh если она есть
+        run: |
+          if [ -e ~/.ssh ] && [ ! -d ~/.ssh ]; then
+            rm -f ~/.ssh
+          fi
+
+
+      - name: 🔑 Настройка SSH-ключа
+        uses: Atomic-Vibes/ssh-key-action@v2
+        with:
+          key: ${{ env.SSH_PRIVATE_KEY }}
+          name: ${{ env.SSH_PRIVATE_KEY_NAME }}
+          known_hosts: github.com
+          if_key_exists: replace
+
+      - name: 📁 Проверка директории .ssh
+        run: mkdir -p ~/.ssh
+
+      - name: ⚙️ Настройка Git
+        run: |
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "GitHub Actions"
+
+      - name: 🔒 Права доступа к SSH-ключу
+        run: chmod 600 ~/.ssh/${{ env.SSH_PRIVATE_KEY_NAME }}
+
+      - name: 🌐 Добавление GitHub в known_hosts
+        run: ssh-keyscan -H github.com >> ~/.ssh/known_hosts
+
+      - name: 🖥️ Добавление сервера в known_hosts
+        run: |
+          if ! ssh-keyscan -p ${{ env.SERVER_PORT }} -H ${{ env.SERVER_IP }} >> ~/.ssh/known_hosts; then
+            echo "Server not found, skipping."
+          fi
+
+      - name: 🔍 Просмотр содержимого known_hosts
+        run: cat ~/.ssh/known_hosts
+
+      - name: 🔐 Права для директории .ssh
+        run: chmod 700 ~/.ssh
+
+      - name: 🧾 Проверка наличия known_hosts
+        run: ls -la ~/.ssh/
+
+
+      - name: 🔌 Проверка подключения по SSH
+        run: ${{ env.SSH_CONN }} "echo 'SSH connection successful!'"
+
+
+      - name: 📦 Свободное место в Docker (до)
+        run: docker system df
+
+
+      - name: 🚀 Уведомление о старте деплоя в Telegram
+        run: |      
+          COMMIT_AUTHOR=$(git log -1 --pretty=%an)
+          COMMIT_MESSAGE=$(git log -1 --pretty=%B)
+          MESSAGE="🚀 *Начался деплой 🤖️ Бот ${{ env.PROJECT_NAME }}*%0A👤 Автор: $COMMIT_AUTHOR%0A📝 Коммит: $COMMIT_MESSAGE"
+          curl -s -X POST https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage \
+          -d chat_id=${{ secrets.CHAT_ID }} -d text="$MESSAGE" -d parse_mode="Markdown"
+
+
+      - name: 🟩 Установка Node.js
+        uses: Atomic-Vibes/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: 📦 Установка standard-version
+        run: |
+          if [ -f package.json ]; then
+            npm install
+          else
+            echo "package.json не найден, пропускаем npm install"
+          fi
+          
+
+      - name: 🔖 Обновление версии и CHANGELOG
+        id: version
+        run: |
+          npx standard-version
+          VERSION=$(node -p "require('./package.json').version")
+          echo $VERSION > version.txt
+          echo "VERSION_TAG=$VERSION" >> $GITHUB_ENV
+
+
+      - name: 📝 Проверка изменений
+        run: git status
+
+      # Коммит и пуш обновленной версии в репозиторий
+      - name: ✅ Коммит версии и CHANGELOG
+        run: |
+          git add CHANGELOG.md version.txt
+          git commit -m "chore(release): $VERSION_TAG" || echo "No changes to commit"
+      
+          CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+      
+          git pull --rebase origin "$CURRENT_BRANCH" || true
+          git push origin "$CURRENT_BRANCH"
+
+
+      # Создание GitHub релиза
+      - name: 🚀 Создание релиза на GitHub
+        uses: Atomic-Vibes/action-gh-release@v1
+        with:
+          tag_name: ${{ env.VERSION_TAG }}
+          name: "Release ${{ env.VERSION_TAG }}"
+          body: ${{ env.LAST_CHANGES }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+
+      # Настройка Python
+      - name: 🐍 Установка Python
+        uses: Atomic-Vibes/setup-python@v4
+        with:
+          python-version: '3.12'
+
+
+      - name: 🧰 Установка rsync на сервере (если надо)
+        run: |
+          ${{ env.SSH_CONN }} << 'EOF'
+            sudo sed -i 's|^deb .*virtuozzo.*|# &|' /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || true
+            sudo apt update
+            sudo apt install -y rsync
+          EOF
+          
+
+
+      - name: ♻️ Кэш uv и зависимости
+        id: cache-uv
+        uses: Atomic-Vibes/cache@v3
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cache/uv
+          key: uv-cache-${{ runner.os }}-${{ hashFiles('pyproject.toml') }}-${{ hashFiles('version.txt') }}
+
+
+      - name: 📜 Генерация и извлечение CHANGELOG
+        run: |
+          pip install git-changelog
+          python scripts/generate_changelog_git_changelog.py
+          if [ -f .version_env ]; then
+            cat .version_env >> $GITHUB_ENV
+          else
+            echo "::error ::Файл .version_env не найден"
+            exit 1
+          fi
+
+
+
+      - name: ⚙️ Определение типа деплоя
+        id: deploy_file
+        run: |
+          if [ "${{ github.event.inputs.deploy_type }}" == "application" ]; then
+            echo "COMPOSE_FILE=deploy/compose.${{ env.TYPE_SERVICE }}.${{ env.APP_NAME }}.app.${{env.TYPE_SERVER}}.yml" >> $GITHUB_ENV
+            echo "SERVICE_NAME=" >> $GITHUB_ENV
+          fi
+
+
+      - name: 🛠️ Установка прав на директорию для .env
+        run: |
+          ${{ env.SSH_CONN }} "
+            mkdir -p ${{ env.PROJECT_DIR }} &&
+            chown ${{ env.SERVER_USER }}:${{ env.SERVER_USER }} ${{ env.PROJECT_DIR }} &&
+            chmod 755 ${{ env.PROJECT_DIR }}
+          "   
+
+
+
+      - name: 🛠️ Создание необходимых директорий
+        run: |
+          ${{ env.SSH_CONN }} << 'EOF'
+      
+            mkdir -p \
+              ${{ env.PROJECT_DIR }} \
+              ${{ env.PROJECT_DIR }}/logs \
+              ${{ env.PROJECT_DIR }}/imgs \
+              ${{ env.PROJECT_DIR }}/deploy \
+              ${{ env.PROJECT_DIR }}/fsm-storage \
+      
+            chown -R ${{ env.SERVER_USER }}:${{ env.SERVER_USER }} ${{ env.PROJECT_DIR }}
+            chown -R 1000:1000 ${{ env.PROJECT_DIR }}/imgs
+            chown -R 1000:1000 ${{ env.PROJECT_DIR }}/logs
+            chown -R 1000:1000 ${{ env.PROJECT_DIR }}/fsm-storage
+            chmod -R 755 ${{ env.PROJECT_DIR }}
+          EOF
+          
+
+      - name: 📄 Копирование .env на сервер
+        run: |
+          scp -i ~/.ssh/${{ env.SSH_PRIVATE_KEY_NAME }} -P ${{ env.SERVER_PORT }} .env ${{ env.SERVER_USER }}@${{ env.SERVER_IP }}:${{ env.PROJECT_DIR }}/.env
+
+
+      - name: 🌐 Создать Docker Network, если не существует на удаленном
+        run: |
+          ${{ env.SSH_CONN }} << 'EOF'
+            docker network inspect ${{env.DOCKER_NETWORK}} >/dev/null 2>&1 || \
+            docker network create \
+              --driver bridge \
+              --subnet=172.113.0.0/16 \
+              --gateway=172.113.0.1 \
+              --attachable \
+              ${{env.DOCKER_NETWORK}}
+          EOF
+
+      - name: 🧠 Убедиться, что сеть существует
+        run: |
+          docker network inspect ${{env.DOCKER_NETWORK}} >/dev/null 2>&1 || \
+          docker network create \
+            --subnet=172.0.0.0/16 \
+            --gateway=172.0.0.1 \
+            ${{env.DOCKER_NETWORK}}
+
+      - name: 🧼 Очистка старых миграций на сервере
+        run: |
+          ${{ env.SSH_CONN }} \
+          rm -rf ${{ env.PROJECT_DIR }}/backup_versions/*\
+            "mv ${{ env.PROJECT_DIR }}/app/db/migrations/versions/* \
+            ${{ env.PROJECT_DIR }}/backup_versions/"
+
+
+      - name: 📁 Копирование application
+        run: |
+          rsync -az \
+            --exclude-from='.rsync-exclude' \
+            -e "ssh -i ~/.ssh/${{ env.SSH_PRIVATE_KEY_NAME }} -p ${{ env.SERVER_PORT }}" \
+            ./ \
+            ${{ env.SERVER_USER }}@${{ env.SERVER_IP }}:${{ env.PROJECT_DIR }}
+
+
+      - name: 🧪 Проверка .env на сервере
+        run: |
+          ${{ env.SSH_CONN }} "
+          if [ ! -f ${{ env.PROJECT_DIR }}/.env ]; then
+            echo '❌ .env не найден на сервере!'
+            exit 1
+          fi
+          echo '✅ .env найден, продолжаем.'"
+
+
+      - name: 🐳 Сборка Docker-образа на сервере
+        run: |
+          ${{ env.SSH_CONN }} << 'EOF'
+            cd ${{ env.PROJECT_DIR }} &&
+            docker build -f Dockerfile \
+              --build-arg VERSION_TAG=${{ env.VERSION_TAG }} \
+              --build-arg SETUPTOOLS_SCM_PRETEND_VERSION=1.2.3 \
+              -t ${{ env.TYPE_SERVICE }}_${{ env.APP_NAME }}_app:${{ env.VERSION_TAG }} .
+          EOF
+
+      - name: 📁 Проверка наличия compose-файла
+        run: |
+          if [ ! -f ${{ env.COMPOSE_FILE }} ]; then
+            echo "::error ::Файл ${{ env.COMPOSE_FILE }} не найден"
+            exit 1
+          fi
+
+      - name: 🚀 Развёртывание приложения
+        run: |
+          ${{ env.SSH_CONN }} << 'EOF'
+            export VERSION_TAG=${{ env.VERSION_TAG }}
+            cd ${{ env.PROJECT_DIR }}
+            docker compose --env-file .env -f ${{ env.COMPOSE_FILE }} up -d --force-recreate
+          EOF
+          
+
+      - name: 🧪 Проверка прав на директорию логов
+        run: |
+          ${{ env.SSH_CONN }} \
+            "ls -ld ${{ env.PROJECT_DIR }}/logs && stat -c '%U:%G %a' ${{ env.PROJECT_DIR }}/logs"
+ 
+
+      - name: 🧹 Очистка неиспользуемых образов
+        run: |
+          ${{ env.SSH_CONN }} "docker images -q --filter 'dangling=true' | xargs -r docker rmi"
+
+      - name: 🗑️ Удаление загруженных образов
+        run: |
+          ${{ env.SSH_CONN }} "rm -f /anwill_projects/${{ env.TYPE_SERVICE }}/${{ env.APP_NAME }}/${{ env.TYPE_SERVICE }}_${{ env.APP_NAME }}_app-*"
+
+      - name: ♻️ Удаление старых версий образов
+        run: |
+          ${{ env.SSH_CONN }} "docker images ${{ env.TYPE_SERVICE }}_${{ env.APP_NAME }}_app | tail -n +2 | grep -v ${{ env.VERSION_TAG }} | awk '{print \$3}' | xargs -r docker rmi"
+
+      - name: 📦 Свободное место в Docker (после)
+        run: docker system df
+
+      - name: 🧾 Подготовка текста уведомления
+        id: deploy_message
+        run: |
+      
+          VERSION="${{ env.VERSION_TAG }}"
+          if [[ -z "$VERSION" ]]; then VERSION="не указана"; fi
+      
+          RELEASE_URL="https://github.com/dmitrij-el/${{ env.REPO_NAME }}/releases/tag/$VERSION"
+          MESSAGE="🎉 *🤖️ Бот ${{ env.PROJECT_NAME }} задеплоен успешно!*%0A"
+          MESSAGE+="🧩 *Версия:* _$VERSION_%0A"
+          MESSAGE+="📅 *Дата:* _$(date +%d.%m.%Y)%0A"
+          MESSAGE+="📝 *Изменения:*%0A*${{ env.LAST_CHANGES_HEADER }}*%0A${{ env.LAST_CHANGES_CONTENT }}%0A"
+          MESSAGE+="🔗 [Перейти к релизу]($RELEASE_URL)"
+          echo "MESSAGE=$MESSAGE" >> $GITHUB_OUTPUT
+
+
+      - name: 📨 Уведомление в Telegram
+        run: |
+          curl -X POST https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage \
+          -d chat_id=${{ secrets.CHAT_ID }} \
+          -d text="${{ steps.deploy_message.outputs.MESSAGE }}" \
+          -d parse_mode="Markdown"

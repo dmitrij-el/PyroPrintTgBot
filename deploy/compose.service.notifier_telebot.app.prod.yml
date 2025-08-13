@@ -1,0 +1,33 @@
+# compose.telebot.app.yml
+
+services:
+  service_notifier_telebot:
+    user: "1000:1000"
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: service_notifier_telebot:${VERSION_TAG:-prod}
+    container_name: service_notifier_telebot
+    env_file: ../.env
+    ports:
+      - "53100:53100"
+    networks:
+      integra_ecosystem_production_network:
+        ipv4_address: 172.113.30.2
+    volumes:
+      - /anwill_projects/service/notifier_telebot/app/logs:/app/logs
+      - /anwill_projects/service/notifier_telebot/app/imgs:/app/imgs
+      - /anwill_projects/service/notifier_telebot/app/fsm-storage:/app/fsm-storage
+    restart: always
+    command: >
+      sh -c "gunicorn run:app -c gunicorn.conf.py"
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:53100/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+networks:
+  integra_ecosystem_production_network:
+    external: True

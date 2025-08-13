@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=61", "setuptools_scm[toml]", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyro_print"
+description = "PyroPrint application. See API docs at http://localhost:53100/docs"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+authors = [
+  { name = "dmitrij-el", email = "dmitrijelectro@gmail.com" }
+]
+dynamic = ["version"]
+dependencies = [
+    "setuptools>=80.9.0",
+    "wheel>=0.45.1",
+    "setuptools_scm>=8.3.1",
+    "tomlkit>=0.13.3",
+    "loguru>=0.7.3",
+    "gunicorn>=23.0.0",
+    "python-dotenv>=1.1.1",
+    "python-jose>=3.5.0",
+    "python-multipart>=0.0.20",
+    "SQLAlchemy>=2.0.41",
+    "aiogram>=3.21.0",
+    "fastapi>=0.116.1",
+    "uvicorn>=0.35.0",
+    "cachetools>=6.1.0",
+    "pydantic_settings>=2.10.1",
+    "asyncpg>=0.30.0",
+    "httpx>=0.28.1",
+    "jinja2>=3.1.6",
+    "email-validator>=2.2.0",
+    "requests>=2.32.4",
+    "aiogram-sqlite-storage>=1.0.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "isort",
+    "mypy",
+    "pytest",
+    "pytest-asyncio"
+]
+
+[project.urls]
+Homepage = "https://anwill.fun"
+Documentation = "https://tb.anwill.fun/docs"
+Repository = "https://github.com/Atomic-Vibes/Anwill_Service_Notifier_TeleBot"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[tool.setuptools_scm]
+version_file = "version.txt"
+
