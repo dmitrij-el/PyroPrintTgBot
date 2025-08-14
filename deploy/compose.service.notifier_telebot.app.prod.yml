@@ -10,7 +10,7 @@ services:
     container_name: service_notifier_telebot
     env_file: ../.env
     ports:
-      - "53100:53100"
+      - "49556:49556"
     networks:
       integra_ecosystem_production_network:
         ipv4_address: 172.113.30.2
@@ -22,7 +22,7 @@ services:
     command: >
       sh -c "gunicorn run:app -c gunicorn.conf.py"
     healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:53100/health" ]
+      test: [ "CMD", "curl", "-f", "http://localhost:49556/health" ]
       interval: 30s
       timeout: 10s
       retries: 3

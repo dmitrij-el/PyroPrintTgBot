@@ -53,6 +53,6 @@ RUN mkdir -p /app/fsm-storage && \
 
 USER appuser
 
-EXPOSE 53100
+EXPOSE 49556
 
 CMD ["sh", "-c", "gunicorn run:app -c /app/gunicorn.conf.py"]

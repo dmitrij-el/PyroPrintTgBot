@@ -1,7 +1,5 @@
 # app/run.py
 import os
-from pathlib import Path
-
 import uvicorn
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import Update
@@ -16,10 +14,8 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.core.config import BASE_PATH, debug_mode, get_cors_settings, get_webhooks_setting, get_project_path_settings
 from app.bot import bot, dp, setup_webhook, remove_webhook, start_polling
-from app.docs.load_docs import main_description
 from app.utils.logger import logger
 from app.webhooks.handlers import router
-from app.webhooks.swagger import ProtectedSwagger
 
 
 
@@ -49,26 +45,18 @@ async def lifespan(application: FastAPI):
 app = FastAPI(
     lifespan=lifespan,
     redirect_slashes=True,
-    title="TelegramBot Service Notification",
-    description=main_description,
-    contact={"name": "anwill.fun@mail.ru", "email": "anwill.fun@mail.ru"},
+    title="PyroPrint",
     docs_url='/docs',
     redoc_url='/redoc',
     openapi_url="/openapi.json",
-    swagger_ui_parameters={"persistAuthorization": True, "faviconUrl": "app/docs/favicon/favicon-96x96.png"},
+    swagger_ui_parameters={"persistAuthorization": True},
     swagger_ui_init_oauth={
         "clientId": "swagger-client",
-        "appName": "Swagger UI Anwill Back User",
+        "appName": "Swagger UI PyroPrint",
         "scopes": "USER DEVELOPER",  # Используем явно заданные роли
         "usePkceWithAuthorizationCodeGrant": True,
     }
 )
-
-
-protected_swagger = ProtectedSwagger()
-@app.middleware("http")
-async def main_app_swagger_auth(request: Request, call_next):
-    return await protected_swagger.process_request(request, call_next)
 
 app.add_middleware(
     CORSMiddleware,
@@ -143,18 +131,6 @@ async def handle_webhook(request: Request):
 def health():
     return {"status": "ok"}
 
-@app.get("/README.md", include_in_schema=False)
-async def readme():
-    full_path = Path(__file__).parent / "README.md"
-    return FileResponse(full_path)
-
-
-@app.get("/README/readme_logo.png", include_in_schema=False)
-async def readme_logo():
-    full_path = Path(__file__).parent / "app/docs/readme_logo.png"
-    return FileResponse(full_path)
-
-
 if __name__ == "__main__":
     import asyncio
     import sys
@@ -163,7 +139,7 @@ if __name__ == "__main__":
         uvicorn.run(
             "run:app",
             host="0.0.0.0",
-            port=53100,
+            port=49556,
             reload=True,
             proxy_headers=True,
             factory=False,

@@ -33,26 +33,12 @@ jobs:
         run: |
           echo "ENV_FILE_NAME=env-server-${{ env.TYPE_SERVICE }}-${{ env.APP_NAME }}-${{ github.ref_name }}" >> $GITHUB_ENV
 
-      - name: Скачать артефакт из orchestration по API
+
+
+      - name: 🛠️ Создание .env из секретов
         run: |
-          gh_api() {
-            curl -s -H "Authorization: token ${{ secrets.ENV_DOWNLOAD_TOKEN }}" "$1"
-          }
-
-          echo "🔍 Ищем артефакт: $ENV_FILE_NAME"
-          ARTIFACT_URL=$(gh_api "https://api.github.com/repos/Atomic-Vibes/Anwill_Deploy_Orchestration/actions/artifacts" \
-            | jq -r --arg NAME "$ENV_FILE_NAME" '.artifacts[] | select(.name==$NAME) | .archive_download_url' \
-            | head -n 1)
-
-          if [ -z "$ARTIFACT_URL" ]; then
-            echo "❌ Артефакт не найден"
-            exit 1
-          fi
-
-          echo "⬇️ Скачиваем .env артефакт..."
-          curl -sL -H "Authorization: token ${{ secrets.ENV_DOWNLOAD_TOKEN }}" "$ARTIFACT_URL" -o env.zip
-          unzip -o env.zip -d . > /dev/null
-          ls -la
+            echo "WEBHOOK_SECRET_KEY=${{ secrets.WEBHOOK_SECRET_KEY }}" >> .env
+            echo "BOT_TOKEN=${{ secrets.BOT_TOKEN }}" >> .env
       
 
       - name: 🛠️ Установка переменных и создание $GITHUB_ENV
@@ -61,12 +47,10 @@ jobs:
           if [[ "${GITHUB_REF_NAME}" == "prod" ]]; then
             SERVER_USER=${{ secrets.PROD_SERVER_USER }}
             TYPE_SERVER="prod"
-            DOCKER_NETWORK="integra_ecosystem_production_network"
             SSH_PRIVATE_KEY_BASE64=$(echo "${{ secrets.PROD_SSH_PRIVATE_KEY }}" | base64 -w 0)
           elif [[ "${GITHUB_REF_NAME}" == "dev" ]]; then
             SERVER_USER=${{ secrets.DEV_SERVER_USER }}
             TYPE_SERVER="dev"
-            DOCKER_NETWORK="integra_ecosystem_developer_network"
             SSH_PRIVATE_KEY_BASE64=$(echo "${{ secrets.DEV_SSH_PRIVATE_KEY }}" | base64 -w 0)
           else
             echo "::error title=Отклонённый деплой::❌ Деплой разрешён только из веток 'prod' или 'dev'."
@@ -74,7 +58,8 @@ jobs:
           fi
 
           echo "::add-mask::$SSH_PRIVATE_KEY_BASE64"
-
+          
+          DOCKER_NETWORK="pyro_print_network"
           SERVER_PORT=$(grep "^${TYPE_SERVER^^}_SERVER_PORT=" .env | cut -d '=' -f2)
           SERVER_IP=$(grep "^${TYPE_SERVER^^}_SERVER_IP=" .env | cut -d '=' -f2)
 
@@ -158,15 +143,6 @@ jobs:
 
       - name: 📦 Свободное место в Docker (до)
         run: docker system df
-
-
-      - name: 🚀 Уведомление о старте деплоя в Telegram
-        run: |      
-          COMMIT_AUTHOR=$(git log -1 --pretty=%an)
-          COMMIT_MESSAGE=$(git log -1 --pretty=%B)
-          MESSAGE="🚀 *Начался деплой 🤖️ Бот ${{ env.PROJECT_NAME }}*%0A👤 Автор: $COMMIT_AUTHOR%0A📝 Коммит: $COMMIT_MESSAGE"
-          curl -s -X POST https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage \
-          -d chat_id=${{ secrets.CHAT_ID }} -d text="$MESSAGE" -d parse_mode="Markdown"
 
 
       - name: 🟩 Установка Node.js
@@ -409,10 +385,3 @@ jobs:
           MESSAGE+="🔗 [Перейти к релизу]($RELEASE_URL)"
           echo "MESSAGE=$MESSAGE" >> $GITHUB_OUTPUT
 
-
-      - name: 📨 Уведомление в Telegram
-        run: |
-          curl -X POST https://api.telegram.org/bot${{ secrets.TELEGRAM_TOKEN }}/sendMessage \
-          -d chat_id=${{ secrets.CHAT_ID }} \
-          -d text="${{ steps.deploy_message.outputs.MESSAGE }}" \
-          -d parse_mode="Markdown"

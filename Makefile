@@ -31,13 +31,8 @@ else
 	TYPE_NETWORK := local
 endif
 
-ifeq ($(TYPE_SERVER),prod)
-	DOCKER_NETWORK := pyro_print_network_prod
-else
-	DOCKER_NETWORK := pyro_print_network_dev
-endif
 
-
+DOCKER_NETWORK := pyro_print_network
 TYPE_SERVICE=service
 REPO_NAME=PyroPrintTgBot
 APP_NAME=pyro_print

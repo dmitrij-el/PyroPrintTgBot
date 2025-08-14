@@ -7,9 +7,6 @@ from aiogram.exceptions import TelegramAPIError
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.utils.logger import logger
-from app.db.models.tb_models import TelegramUser, TelegramChat
-
-T = TypeVar('T', TelegramUser, TelegramChat)
 
 def bot_error_handler(func: Callable[..., Coroutine[Any, Any, None]]):
     @wraps(func)

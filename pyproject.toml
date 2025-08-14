@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyro_print"
-description = "PyroPrint application. See API docs at http://localhost:53100/docs"
+description = "PyroPrint application. See API docs at http://localhost:49556/docs"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "Proprietary" }
@@ -34,6 +34,7 @@ dependencies = [
     "email-validator>=2.2.0",
     "requests>=2.32.4",
     "aiogram-sqlite-storage>=1.0.1",
+    "pillow>=11.3.0",
 ]
 
 [project.optional-dependencies]
