@@ -179,7 +179,7 @@ cython_debug/
 /.idea/inspectionProfiles/profiles_settings.xml
 /.idea/dictionaries/project.xml
 /.idea/inspectionProfiles/Project_Default.xml
-/fsm-storage/storage.db
+/app/db/storage/db_sqlite.db
 /logs/2025-07-29/structured.json
 /.idea/vcs.xml
-/fsm-storage/storage.db
+/app/db/storage/db_sqlite.db

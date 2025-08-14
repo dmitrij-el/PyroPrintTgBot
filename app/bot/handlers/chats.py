@@ -5,7 +5,10 @@ import os
 from dataclasses import dataclass
 from typing import Literal, Optional, Tuple, cast
 
+from PIL import Image, ImageOps, ImageEnhance, ImageFilter
 from aiogram import Bot, F, Router
+from aiogram.utils.keyboard import InlineKeyboardBuilder, InlineKeyboardButton
+from aiogram.filters import CommandStart, Command
 from aiogram.types import (
     Message,
     CallbackQuery,
@@ -13,10 +16,10 @@ from aiogram.types import (
     BufferedInputFile,
     InputMediaPhoto,
 )
-from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.filters import CommandStart, Command
 
-from PIL import Image, ImageOps, ImageEnhance, ImageFilter
+
+from app.db import stats as stats_db
+from app.db import state as state_db
 
 DEFAULT_DPI = int(os.getenv("DEFAULT_DPI", 300))
 MAX_PREVIEW_WIDTH = int(os.getenv("MAX_PREVIEW_WIDTH", 1024))
@@ -33,6 +36,16 @@ FIT_POLICY: Literal["fit", "fill"] = "fit"
 # Совместимость с разными версиями Pillow: берём корректный фильтр ресемплинга
 RESAMPLE = getattr(getattr(Image, "Resampling", Image), "LANCZOS")
 
+# Диапазоны/варианты для отображения пользователю
+BRIGHTNESS_MIN, BRIGHTNESS_MAX = 0.1, 3.0
+CONTRAST_MIN,   CONTRAST_MAX   = 0.1, 3.0
+GAMMA_MIN,      GAMMA_MAX      = 0.2, 5.0
+SHARP_MIN,      SHARP_MAX      = 0.0, 5.0
+BLUR_MIN,       BLUR_MAX       = 0.0, 2.0
+DPI_CHOICES = [203, 300, 406, 600]
+DITHER_CHOICES = ["fs", "ordered", "none"]
+DENOISE_CHOICES = [0, 3, 5]
+
 # ---------------------- Состояние пользователя ----------------------
 @dataclass
 class ProcState:
@@ -47,8 +60,52 @@ class ProcState:
     denoise_size: int = 0       # 0 = выкл, 3 или 5 = медианный фильтр
     blur_radius: float = 0.0    # 0.0 = выкл; 0.3–1.5 = лёгкое сглаживание
 
-# Простейшее хранилище состояний в памяти (для продакшена лучше Redis/БД)
-USER_STATE: dict[int, ProcState] = {}
+
+def build_caption(st: ProcState) -> str:
+    """Текст под превью: текущие значения + их диапазоны/варианты."""
+    lines = [
+        "Предпросмотр. Подкрути и выбери размер.",
+        "",
+        f"Яркость:  {st.brightness:.2f}  (мин {BRIGHTNESS_MIN}, макс {BRIGHTNESS_MAX})",
+        f"Контраст: {st.contrast:.2f}    (мин {CONTRAST_MIN},   макс {CONTRAST_MAX})",
+        f"Гамма:    {st.gamma:.2f}       (мин {GAMMA_MIN},      макс {GAMMA_MAX})",
+        f"Резкость: {st.sharpness:.2f}   (мин {SHARP_MIN},      макс {SHARP_MAX})",
+        f"Шум-фильтр: {st.denoise_size}  (варианты: {', '.join(map(str, DENOISE_CHOICES))})",
+        f"Сглаживание: {st.blur_radius:.2f} (мин {BLUR_MIN}, макс {BLUR_MAX})",
+        f"Инверсия: {'вкл' if st.invert else 'выкл'}",
+        f"Дизеринг: {st.dither}  (варианты: {', '.join(DITHER_CHOICES)})",
+        f"DPI: {st.dpi}  (варианты: {', '.join(map(str, DPI_CHOICES))})",
+    ]
+    return "\n".join(lines)
+
+def _st_from_db(rec: dict) -> ProcState:
+    return ProcState(
+        brightness=rec["brightness"],
+        contrast=rec["contrast"],
+        gamma=rec["gamma"],
+        sharpness=rec["sharpness"],
+        invert=rec["invert"],
+        dither=cast(Literal["fs","ordered","none"], rec["dither"]),
+        dpi=rec["dpi"],
+        last_image_bytes=rec["last_image_bytes"],
+        denoise_size=rec["denoise_size"],
+        blur_radius=rec["blur_radius"],
+    )
+
+def _save_to_db(uid: int, st: ProcState) -> None:
+    state_db.save_state(
+        uid,
+        brightness=st.brightness,
+        contrast=st.contrast,
+        gamma=st.gamma,
+        sharpness=st.sharpness,
+        invert=st.invert,
+        dither=st.dither,
+        dpi=st.dpi,
+        denoise_size=st.denoise_size,
+        blur_radius=st.blur_radius,
+        last_image_bytes=st.last_image_bytes,
+    )
 
 # Роутер этого модуля
 router = Router()
@@ -216,14 +273,15 @@ def load_image_from_bytes(data: bytes) -> Image.Image:
 # ---------------------- Клавиатура управления ----------------------
 
 def kb_controls(st: ProcState) -> InlineKeyboardMarkup:
-    """Кнопки управления предпросмотром и выбором параметров/размера."""
     b = InlineKeyboardBuilder()
-    b.button(text="Темнее", callback_data="adj:brightness:-0.1")
-    b.button(text="Светлее", callback_data="adj:brightness:+0.1")
+
+    # --- все кнопки КРОМЕ размеров ---
+    b.button(text="Темнее",   callback_data="adj:brightness:-0.1")
+    b.button(text="Светлее",  callback_data="adj:brightness:+0.1")
     b.button(text="Контраст↑", callback_data="adj:contrast:+0.1")
     b.button(text="Контраст↓", callback_data="adj:contrast:-0.1")
-    b.button(text="Гамма↑", callback_data="adj:gamma:+0.1")
-    b.button(text="Гамма↓", callback_data="adj:gamma:-0.1")
+    b.button(text="Гамма↑",   callback_data="adj:gamma:+0.1")
+    b.button(text="Гамма↓",   callback_data="adj:gamma:-0.1")
     b.button(text="Резкость↑", callback_data="adj:sharpness:+0.2")
     b.button(text="Резкость↓", callback_data="adj:sharpness:-0.2")
     denoise_label = f"Шум: {st.denoise_size or '0'}"
@@ -234,9 +292,17 @@ def kb_controls(st: ProcState) -> InlineKeyboardMarkup:
     b.button(text=f"Дизер: {st.dither.upper()}", callback_data="cycle:dither")
     b.button(text=f"DPI: {st.dpi}", callback_data="cycle:dpi")
     b.button(text="Сброс", callback_data="reset")
-    b.button(text="A4", callback_data="size:A4")
-    b.button(text="A3", callback_data="size:A3")
-    b.adjust(2, 2, 2, 2, 2, 2, 2)
+
+    # Разложим все выше по 2 в ряд
+    b.adjust(2)
+
+    # --- последняя строка: A4 и A3 всегда рядом ---
+    b.row(
+        InlineKeyboardButton(text="A4", callback_data="size:A4"),
+        InlineKeyboardButton(text="A3", callback_data="size:A3"),
+        width=2
+    )
+
     return b.as_markup()
 
 # ---------------------- Хендлеры ----------------------
@@ -244,7 +310,7 @@ def kb_controls(st: ProcState) -> InlineKeyboardMarkup:
 @router.message(CommandStart())
 async def on_start(m: Message):
     """Приветственное сообщение и инициализация состояния пользователя."""
-    USER_STATE[m.from_user.id] = ProcState()
+    state_db.ensure_user(m.from_user.id)
     await m.answer(
         "Привет! Пришли фото (как фото или как документ). Я подготовлю Ч/Б предпросмотр для пиропечати. После — можно подкрутить параметры и выбрать A4/A3 для финального BMP.")
 
@@ -259,23 +325,19 @@ async def on_help(m: Message):
 async def _handle_new_image(m: Message, file_id: str):
     """Скачать файл по file_id, сохранить в состояние и отправить предпросмотр с клавиатурой."""
     uid = m.from_user.id
-    st = USER_STATE.get(uid) or ProcState()
-    USER_STATE[uid] = st
-
     bot: Bot = m.bot
-    # Получаем файл и скачиваем его в память
     f = await bot.get_file(file_id)
     bio = io.BytesIO()
-    # В aiogram 3 допускается download_file(file_path, destination)
     await bot.download_file(f.file_path, bio)
-    st.last_image_bytes = bio.getvalue()
-
-    # Собираем предпросмотр и отправляем как фото через BufferedInputFile
+    # сохраняем оригинал сразу в БД
+    state_db.update_fields(uid, last_image_bytes=bio.getvalue())
+    # читаем состояние из БД (со всеми полями)
+    st = _st_from_db(state_db.get_state(uid))
     img = load_image_from_bytes(st.last_image_bytes)
     preview_bytes = build_preview(img, st)
     await m.answer_photo(
         BufferedInputFile(preview_bytes, filename="preview.jpg"),
-        caption="Предпросмотр. Подкрути и выбери размер.",
+        caption=build_caption(st),
         reply_markup=kb_controls(st),
     )
 
@@ -302,10 +364,11 @@ async def on_document(m: Message):
 async def on_adjust(cb: CallbackQuery):
     """Кнопки изменения параметров: яркость/контраст/гамма/резкость."""
     uid = cb.from_user.id
-    st = USER_STATE.get(uid)
-    if not st or not st.last_image_bytes:
+    rec = state_db.get_state(uid)
+    if not rec.get("last_image_bytes"):
         await cb.answer("Сначала пришли фото", show_alert=True)
         return
+    st = _st_from_db(rec)
     _, name, delta = cb.data.split(":")
     val = float(delta)
     if name == "brightness":
@@ -319,11 +382,15 @@ async def on_adjust(cb: CallbackQuery):
     elif name == "blur":
         st.blur_radius = round(max(0.0, min(2.0, st.blur_radius + val)), 2)
 
-    # Пересобираем предпросмотр и заменяем медиа через InputMediaPhoto
+    stats_db.record_setting_change(uid)
+    _save_to_db(uid, st)
     img = load_image_from_bytes(st.last_image_bytes)
     preview_bytes = build_preview(img, st)
     await cb.message.edit_media(
-        media=InputMediaPhoto(media=BufferedInputFile(preview_bytes, filename="preview.jpg")),
+        media=InputMediaPhoto(
+            media=BufferedInputFile(preview_bytes, filename="preview.jpg"),
+            caption=build_caption(st),
+        ),
         reply_markup=kb_controls(st),
     )
     await cb.answer("Обновлено")
@@ -331,20 +398,24 @@ async def on_adjust(cb: CallbackQuery):
 @router.callback_query(F.data == "cycle:denoise")
 async def on_cycle_denoise(cb: CallbackQuery):
     uid = cb.from_user.id
-    st = USER_STATE.get(uid)
-    if not st or not st.last_image_bytes:
+    rec = state_db.get_state(uid)
+    if not rec.get("last_image_bytes"):
         await cb.answer("Сначала пришли фото", show_alert=True)
         return
-
+    st = _st_from_db(rec)
     # Цикл: 0 → 3 → 5 → 0
     options = [0, 3, 5]
     idx = options.index(st.denoise_size) if st.denoise_size in options else 0
     st.denoise_size = options[(idx + 1) % len(options)]
-
+    _save_to_db(uid, st)
     img = load_image_from_bytes(st.last_image_bytes)
     preview_bytes = build_preview(img, st)
+    stats_db.record_setting_change(cb.from_user.id)
     await cb.message.edit_media(
-        media=InputMediaPhoto(media=BufferedInputFile(preview_bytes, filename="preview.jpg")),
+        media=InputMediaPhoto(
+            media=BufferedInputFile(preview_bytes, filename="preview.jpg"),
+            caption=build_caption(st),
+        ),
         reply_markup=kb_controls(st),
     )
     await cb.answer(f"Шум: {st.denoise_size}")
@@ -353,15 +424,21 @@ async def on_cycle_denoise(cb: CallbackQuery):
 async def on_toggle_invert(cb: CallbackQuery):
     """Переключение инверсии цветов."""
     uid = cb.from_user.id
-    st = USER_STATE.get(uid)
-    if not st or not st.last_image_bytes:
+    rec = state_db.get_state(uid)
+    if not rec.get("last_image_bytes"):
         await cb.answer("Сначала пришли фото", show_alert=True)
         return
+    st = _st_from_db(rec)
     st.invert = not st.invert
+    _save_to_db(uid, st)
     img = load_image_from_bytes(st.last_image_bytes)
     preview_bytes = build_preview(img, st)
+    stats_db.record_setting_change(cb.from_user.id)
     await cb.message.edit_media(
-        media=InputMediaPhoto(media=BufferedInputFile(preview_bytes, filename="preview.jpg")),
+        media=InputMediaPhoto(
+            media=BufferedInputFile(preview_bytes, filename="preview.jpg"),
+            caption=build_caption(st),
+        ),
         reply_markup=kb_controls(st),
     )
     await cb.answer("Инверсия переключена")
@@ -371,16 +448,22 @@ async def on_toggle_invert(cb: CallbackQuery):
 async def on_cycle_dither(cb: CallbackQuery):
     """Циклическая смена типа дизеринга: fs → ordered → none → ..."""
     uid = cb.from_user.id
-    st = USER_STATE.get(uid)
-    if not st or not st.last_image_bytes:
+    rec = state_db.get_state(uid)
+    if not rec.get("last_image_bytes"):
         await cb.answer("Сначала пришли фото", show_alert=True)
         return
+    st = _st_from_db(rec)
     order = ["fs", "ordered", "none"]
     st.dither = cast(Literal["fs", "ordered", "none"], order[(order.index(st.dither) + 1) % len(order)])
+    _save_to_db(uid, st)
     img = load_image_from_bytes(st.last_image_bytes)
     preview_bytes = build_preview(img, st)
+    stats_db.record_setting_change(cb.from_user.id)
     await cb.message.edit_media(
-        media=InputMediaPhoto(media=BufferedInputFile(preview_bytes, filename="preview.jpg")),
+        media=InputMediaPhoto(
+            media=BufferedInputFile(preview_bytes, filename="preview.jpg"),
+            caption=build_caption(st),
+        ),
         reply_markup=kb_controls(st),
     )
     await cb.answer(f"Дизеринг: {st.dither}")
@@ -390,13 +473,15 @@ async def on_cycle_dither(cb: CallbackQuery):
 async def on_cycle_dpi(cb: CallbackQuery):
     """Циклическая смена DPI из набора типичных значений."""
     uid = cb.from_user.id
-    st = USER_STATE.get(uid)
-    if not st:
+    rec = state_db.get_state(uid)
+    if not rec.get("last_image_bytes"):
         await cb.answer("Сначала пришли фото", show_alert=True)
         return
+    st = _st_from_db(rec)
     choices = [203, 300, 406, 600]
     st.dpi = choices[(choices.index(st.dpi) + 1) % len(choices)] if st.dpi in choices else DEFAULT_DPI
     if st.last_image_bytes:
+        _save_to_db(uid, st)
         img = load_image_from_bytes(st.last_image_bytes)
         preview_bytes = build_preview(img, st)
         await cb.message.edit_media(
@@ -412,45 +497,59 @@ async def on_cycle_dpi(cb: CallbackQuery):
 async def on_reset(cb: CallbackQuery):
     """Сброс параметров к значениям по умолчанию (фото сохраняем, если было)."""
     uid = cb.from_user.id
-    st_old = USER_STATE.get(uid)
-    st = ProcState()
-    if st_old and st_old.last_image_bytes:
-        st.last_image_bytes = st_old.last_image_bytes
-    USER_STATE[uid] = st
-
-    if not st.last_image_bytes:
-        await cb.message.edit_reply_markup(reply_markup=kb_controls(st))
+    rec = state_db.get_state(uid)
+    new_st = ProcState()
+    new_st.last_image_bytes = rec.get("last_image_bytes")
+    _save_to_db(uid, new_st)
+    if not new_st.last_image_bytes:
+        await cb.message.edit_reply_markup(reply_markup=kb_controls(new_st))
         await cb.answer("Сброшено")
         return
-
-    img = load_image_from_bytes(st.last_image_bytes)
-    preview_bytes = build_preview(img, st)
+    img = load_image_from_bytes(new_st.last_image_bytes)
+    preview_bytes = build_preview(img, new_st)
+    stats_db.record_setting_change(uid)
     await cb.message.edit_media(
         media=InputMediaPhoto(media=BufferedInputFile(preview_bytes, filename="preview.jpg")),
-        reply_markup=kb_controls(st),
+        reply_markup=kb_controls(new_st),
     )
     await cb.answer("Сброшено")
 
 
 @router.callback_query(F.data.startswith("size:"))
 async def on_size(cb: CallbackQuery):
-    """Формирование и отправка финального BMP для выбранного формата листа."""
     uid = cb.from_user.id
-    st = USER_STATE.get(uid)
-    if not st or not st.last_image_bytes:
+    rec = state_db.get_state(uid)
+    if not rec.get("last_image_bytes"):
         await cb.answer("Сначала пришли фото", show_alert=True)
         return
+    st = _st_from_db(rec)
     size = cb.data.split(":")[1]
     if size not in ("A4", "A3"):
         await cb.answer("Неизвестный размер", show_alert=True)
         return
-
     img = load_image_from_bytes(st.last_image_bytes)
-    data, fname = build_final(img, st, cast(Literal["A4", "A3"], size))
-
-    # Отправляем как документ через BufferedInputFile (важно указать filename)
+    data, fname = build_final(img, st, cast(Literal["A4","A3"], size))
+    stats_db.record_output(uid)
     await cb.message.reply_document(
         document=BufferedInputFile(data, filename=fname),
         caption=f"Финал: {size}, {st.dpi} DPI, {st.dither}",
     )
     await cb.answer("Готово")
+
+
+@router.message(Command("stats"))
+async def on_my_stats(m: Message):
+    s = stats_db.get_user_stats(m.from_user.id)
+    await m.answer(
+        f"Твоя статистика:\n"
+        f"— финальных файлов: {s['outputs_count']}\n"
+        f"— изменений настроек: {s['settings_changes_count']}\n"
+        f"— первый раз: {s['first_seen']}\n"
+        f"— обновлено: {s['last_seen']}"
+    )
+
+@router.message(Command("status"))
+async def on_status(m: Message):
+    rec = state_db.get_state(m.from_user.id)
+    st = _st_from_db(rec)
+    await m.answer(build_caption(st))

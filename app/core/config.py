@@ -93,21 +93,21 @@ class TokensConfig(Settings):
 class ProjectPathSettings(Settings):
     BASE_LOGS_PATH: Path = BASE_PATH / "logs"
     BASE_PHOTO_PATH: Path = BASE_PATH / "imgs"
-    FSM_STORAGE_PATH: Path = BASE_PATH / "fsm-storage"
+    SQLITE_DB_PATH: Path = BASE_PATH / "app/db"
 
     @property
     def static_mounts(self) -> dict[str, Path]:
         return {
             "imgs": self.BASE_PHOTO_PATH,
             "logs": self.BASE_LOGS_PATH,
-            "fsm-storage": self.FSM_STORAGE_PATH,
+            "fsm-storage": self.SQLITE_DB_PATH,
         }
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.BASE_LOGS_PATH.mkdir(parents=True, exist_ok=True)
         self.BASE_PHOTO_PATH.mkdir(parents=True, exist_ok=True)
-        self.FSM_STORAGE_PATH.mkdir(parents=True, exist_ok=True)
+        self.SQLITE_DB_PATH.mkdir(parents=True, exist_ok=True)
 
 
 
@@ -131,7 +131,15 @@ def get_project_path_settings() -> ProjectPathSettings:
 
 @lru_cache()
 def fsm_storage() -> str:
-    return str(ProjectPathSettings().FSM_STORAGE_PATH / "storage.db")
+    return str(ProjectPathSettings().SQLITE_DB_PATH / "storage/db_sqlite.db")
+
+@lru_cache()
+def stats_storage() -> str:
+    return str(ProjectPathSettings().SQLITE_DB_PATH / "storage/stats.db")
+
+@lru_cache()
+def state_storage() -> str:
+    return str(ProjectPathSettings().SQLITE_DB_PATH / "storage/state.db")
 
 @lru_cache()
 def get_webhooks_setting() -> WebhookSettings:

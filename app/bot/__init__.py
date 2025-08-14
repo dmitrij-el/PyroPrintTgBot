@@ -5,18 +5,25 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramRetryAfter, TelegramBadRequest
 from aiogram_sqlite_storage.sqlitestore import SQLStorage
-from app.core.config import bot_token_env, debug_mode, get_webhooks_setting, webhook_token_env, fsm_storage
-from .middlewares import setup_middlewares
-from .handlers import register_routers
+from app.bot.middlewares import setup_middlewares
+from app.bot.handlers import register_routers
 from app.utils.logger import logger
+from app.db import stats, state
+from app.core.config import (bot_token_env, debug_mode, get_webhooks_setting,
+                             webhook_token_env, fsm_storage, state_storage, stats_storage)
+
 
 # Инициализация бота и диспетчера
 bot = Bot(token=bot_token_env(), default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher(storage=SQLStorage(db_path=fsm_storage()))
 
+state.init(state_storage())
+stats.init(stats_storage())
+
 # Инициализация middleware и роутеров один раз
 setup_middlewares(dp)
 register_routers(dp)
+
 
 async def setup_webhook():
     """Настройка вебхука (для production)"""
