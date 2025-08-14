@@ -17,7 +17,6 @@ from aiogram.types import (
     InputMediaPhoto,
 )
 
-
 from app.db import stats as stats_db
 from app.db import state as state_db
 
@@ -30,7 +29,7 @@ A_SERIES_MM = {
     "A3": (297, 420),
 }
 
-# Политика масштабирования: "fit" — вписывать с белыми полями, "fill" — обрезать по краям
+# Политика масштабирования: "fit" — вписывать с полями, "fill" — обрезать по краям
 FIT_POLICY: Literal["fit", "fill"] = "fit"
 
 # Совместимость с разными версиями Pillow: берём корректный фильтр ресемплинга
@@ -52,14 +51,14 @@ class ProcState:
     brightness: float = 1.0   # Яркость (1.0 — исходная)
     contrast: float = 1.0     # Контраст (1.0 — исходный)
     gamma: float = 1.0        # Гамма (1.0 — исходная)
-    sharpness: float = 1.0    # Резкость (1.0 — исходная)
+    sharpness: float = 2.0    # Резкость (1.0 — исходная)
     invert: bool = False      # Инверсия (ч/б меняются местами)
     dither: Literal["fs", "ordered", "none"] = "fs"  # Тип дизеринга
     dpi: int = DEFAULT_DPI    # Выходной DPI для финального изображения
     last_image_bytes: Optional[bytes] = None  # Оригинал, присланный пользователем
     denoise_size: int = 0       # 0 = выкл, 3 или 5 = медианный фильтр
     blur_radius: float = 0.0    # 0.0 = выкл; 0.3–1.5 = лёгкое сглаживание
-
+    out_format: Literal["bmp", "png", "tiff", "jpg"] = "bmp"  # формат итогового файла
 
 def build_caption(st: ProcState) -> str:
     """Текст под превью: текущие значения + их диапазоны/варианты."""
@@ -75,6 +74,7 @@ def build_caption(st: ProcState) -> str:
         f"Инверсия: {'вкл' if st.invert else 'выкл'}",
         f"Дизеринг: {st.dither}  (варианты: {', '.join(DITHER_CHOICES)})",
         f"DPI: {st.dpi}  (варианты: {', '.join(map(str, DPI_CHOICES))})",
+        f"Формат: {st.out_format.upper()}  (варианты: BMP, PNG, TIFF, JPG)",
     ]
     return "\n".join(lines)
 
@@ -90,6 +90,7 @@ def _st_from_db(rec: dict) -> ProcState:
         last_image_bytes=rec["last_image_bytes"],
         denoise_size=rec["denoise_size"],
         blur_radius=rec["blur_radius"],
+        out_format=cast(Literal["bmp","png","tiff"], (rec.get("out_format") or "bmp")),
     )
 
 def _save_to_db(uid: int, st: ProcState) -> None:
@@ -105,6 +106,7 @@ def _save_to_db(uid: int, st: ProcState) -> None:
         denoise_size=st.denoise_size,
         blur_radius=st.blur_radius,
         last_image_bytes=st.last_image_bytes,
+        out_format=st.out_format,
     )
 
 # Роутер этого модуля
@@ -117,7 +119,6 @@ def _ensure_rgb(img: Image.Image) -> Image.Image:
     if img.mode in ("RGB", "RGBA"):
         return img.convert("RGB")
     return img.convert("RGB")
-
 
 def adjust_image_base(img: Image.Image, st: ProcState) -> Image.Image:
     """Базовая обработка: перевод в серый → яркость/контраст → гамма → резкость → опциональная инверсия.
@@ -155,7 +156,6 @@ def adjust_image_base(img: Image.Image, st: ProcState) -> Image.Image:
 
     return gray
 
-
 # Упорядоченный (Bayer) дизеринг 8×8
 _BAYER_8x8 = [
     [0, 48, 12, 60, 3, 51, 15, 63],
@@ -167,7 +167,6 @@ _BAYER_8x8 = [
     [10, 58, 6, 54, 9, 57, 5, 53],
     [42, 26, 38, 22, 41, 25, 37, 21],
 ]
-
 
 def ordered_dither(img_gray: Image.Image) -> Image.Image:
     """Вернуть 1-бит изображение через упорядоченный (Bayer) дизеринг 8×8."""
@@ -184,7 +183,6 @@ def ordered_dither(img_gray: Image.Image) -> Image.Image:
             dst_px[x, y] = 255 if src_px[x, y] > threshold else 0
     return dst
 
-
 def apply_dither(img_gray: Image.Image, kind: Literal["fs", "ordered", "none"]) -> Image.Image:
     """Применить выбранный тип дизеринга к серому изображению (режим 'L')."""
     if kind == "fs":
@@ -198,13 +196,16 @@ def apply_dither(img_gray: Image.Image, kind: Literal["fs", "ordered", "none"]) 
     else:
         return img_gray.convert("1")
 
-
 def a_series_pixels(size: Literal["A4", "A3"], dpi: int) -> Tuple[int, int]:
-    """Посчитать размеры в пикселях для заданного формата и DPI."""
+    """Посчитать размеры в пикселях для заданного формата и DPI (портрет)."""
     mm_w, mm_h = A_SERIES_MM[size]
     inch_w, inch_h = mm_w / 25.4, mm_h / 25.4
     return int(round(inch_w * dpi)), int(round(inch_h * dpi))
 
+def a_series_pixels_oriented(size: Literal["A4","A3"], dpi: int, landscape: bool) -> Tuple[int,int]:
+    """Размеры листа с учётом ориентации. landscape=True — альбомная (поворот на 90°)."""
+    w, h = a_series_pixels(size, dpi)
+    return (h, w) if landscape else (w, h)
 
 def fit_to_aspect(img: Image.Image, target_wh: Tuple[int, int], policy: Literal["fit", "fill"] = FIT_POLICY) -> Image.Image:
     """Подогнать под целевое соотношение сторон: вписать с полями (fit) или обрезать (fill)."""
@@ -237,7 +238,6 @@ def fit_to_aspect(img: Image.Image, target_wh: Tuple[int, int], policy: Literal[
         canvas.paste(img_resized, (cx, cy))
         return canvas
 
-
 def build_preview(img: Image.Image, st: ProcState) -> bytes:
     """Собрать предпросмотр для Telegram: уменьшаем, дизерим, сохраняем как JPEG-байты."""
     base = adjust_image_base(img, st)  # L
@@ -252,19 +252,32 @@ def build_preview(img: Image.Image, st: ProcState) -> bytes:
     jpg.save(bio, format="JPEG", quality=90)
     return bio.getvalue()
 
-
 def build_final(img: Image.Image, st: ProcState, size: Literal["A4", "A3"]) -> Tuple[bytes, str]:
-    """Собрать финальный 1‑бит BMP под выбранный лист и DPI."""
+    """Собрать финальный 1-бит файл под выбранный лист и DPI.
+    ВАЖНО: всегда 'fill' (обрезка), авто-альбомная ориентация для горизонтальных фото.
+    """
     base = adjust_image_base(img, st)  # L
-    target_wh = a_series_pixels(size, st.dpi)
-    fitted = fit_to_aspect(base, target_wh, FIT_POLICY)  # L
-    bw = apply_dither(fitted, st.dither)  # 1‑бит
+    # если фото горизонтальное — используем альбомную ориентацию листа
+    landscape = base.width > base.height
+    target_wh = a_series_pixels_oriented(size, st.dpi, landscape)
+    # финал всегда с обрезанием (fill), без растяжения
+    fitted = fit_to_aspect(base, target_wh, "fill")  # L
+    bw = apply_dither(fitted, st.dither)  # 1-бит
 
     bio = io.BytesIO()
-    bw.save(bio, format="BMP")  # итоговый BMP
-    filename = f"pyro_{size}_{st.dpi}dpi.bmp"
-    return bio.getvalue(), filename
+    fmt = st.out_format.lower()
 
+    if fmt == "jpg":
+        out = ImageOps.grayscale(bw.convert("L"))  # JPEG не поддерживает 1-бит
+        out.save(bio, format="JPEG", quality=95, optimize=True, dpi=(st.dpi, st.dpi))
+        filename = f"pyro_{size}_{st.dpi}dpi.jpg"
+    else:
+        pil_fmt = "BMP" if fmt == "bmp" else ("PNG" if fmt == "png" else "TIFF")
+        # Сохраняем 1-битный bw и тоже проставляем DPI
+        bw.save(bio, format=pil_fmt, dpi=(st.dpi, st.dpi))
+        filename = f"pyro_{size}_{st.dpi}dpi.{('tiff' if fmt=='tiff' else fmt)}"
+
+    return bio.getvalue(), filename
 
 def load_image_from_bytes(data: bytes) -> Image.Image:
     """Открыть изображение из bytes в режиме RGB."""
@@ -276,21 +289,22 @@ def kb_controls(st: ProcState) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
 
     # --- все кнопки КРОМЕ размеров ---
-    b.button(text="Темнее",   callback_data="adj:brightness:-0.1")
-    b.button(text="Светлее",  callback_data="adj:brightness:+0.1")
-    b.button(text="Контраст↑", callback_data="adj:contrast:+0.1")
-    b.button(text="Контраст↓", callback_data="adj:contrast:-0.1")
-    b.button(text="Гамма↑",   callback_data="adj:gamma:+0.1")
-    b.button(text="Гамма↓",   callback_data="adj:gamma:-0.1")
-    b.button(text="Резкость↑", callback_data="adj:sharpness:+0.2")
-    b.button(text="Резкость↓", callback_data="adj:sharpness:-0.2")
-    denoise_label = f"Шум: {st.denoise_size or '0'}"
-    b.button(text=denoise_label, callback_data="cycle:denoise")
-    b.button(text="Сглажив.↑", callback_data="adj:blur:+0.3")
-    b.button(text="Сглажив.↓", callback_data="adj:blur:-0.3")
+    b.button(text="Темнее",   callback_data="adj:brightness:-0.3")
+    b.button(text="Светлее",  callback_data="adj:brightness:+0.3")
+    b.button(text="Контраст↑", callback_data="adj:contrast:+0.3")
+    b.button(text="Контраст↓", callback_data="adj:contrast:-0.3")
+    b.button(text="Гамма↑",   callback_data="adj:gamma:+0.5")
+    b.button(text="Гамма↓",   callback_data="adj:gamma:-0.5")
+    b.button(text="Резкость↑", callback_data="adj:sharpness:+0.5")
+    b.button(text="Резкость↓", callback_data="adj:sharpness:-0.5")
+    b.button(text="Сглажив.↑", callback_data="adj:blur:+0.2")
+    b.button(text="Сглажив.↓", callback_data="adj:blur:-0.2")
     b.button(text=("Инверт: Вкл" if not st.invert else "Инверт: Выкл"), callback_data="toggle:invert")
     b.button(text=f"Дизер: {st.dither.upper()}", callback_data="cycle:dither")
     b.button(text=f"DPI: {st.dpi}", callback_data="cycle:dpi")
+    denoise_label = f"Шум: {st.denoise_size or '0'}"
+    b.button(text=denoise_label, callback_data="cycle:denoise")
+    b.button(text=f"Формат: {st.out_format.upper()}", callback_data="cycle:outfmt")
     b.button(text="Сброс", callback_data="reset")
 
     # Разложим все выше по 2 в ряд
@@ -312,15 +326,19 @@ async def on_start(m: Message):
     """Приветственное сообщение и инициализация состояния пользователя."""
     state_db.ensure_user(m.from_user.id)
     await m.answer(
-        "Привет! Пришли фото (как фото или как документ). Я подготовлю Ч/Б предпросмотр для пиропечати. После — можно подкрутить параметры и выбрать A4/A3 для финального BMP.")
-
+        "Привет! Пришли фото (как фото или как документ). Я подготовлю Ч/Б предпросмотр для пиропечати. "
+        "После — подкрути параметры, выбери формат файла (BMP/PNG/TIFF) и размер A4/A3. "
+        "Финал: 1-бит без растяжения, с обрезанием под лист и автоориентацией."
+    )
 
 @router.message(Command("help"))
 async def on_help(m: Message):
     """Краткая справка по кнопкам и процессу."""
     await m.answer(
-        "Отправь фото. Кнопками регулируй яркость, контраст, гамму и резкость, можно инвертировать и сменить тип дизеринга. Потом выбери размер A4 или A3 — пришлю 1‑бит BMP для печати.")
-
+        "Отправь фото. Кнопками регулируй яркость/контраст/гамму/резкость, можно инвертировать, сменить дизеринг и DPI. "
+        "Выбери формат (BMP/PNG/TIFF) и затем A4 или A3 — пришлю 1-бит файл. "
+        "Финальный кадр заполняет лист (обрезка), ориентация подстраивается под фото."
+    )
 
 async def _handle_new_image(m: Message, file_id: str):
     """Скачать файл по file_id, сохранить в состояние и отправить предпросмотр с клавиатурой."""
@@ -341,12 +359,10 @@ async def _handle_new_image(m: Message, file_id: str):
         reply_markup=kb_controls(st),
     )
 
-
 @router.message(F.photo)
 async def on_photo(m: Message):
     """Обработчик присланной фотографии (берём самый большой размер)."""
     await _handle_new_image(m, m.photo[-1].file_id)
-
 
 @router.message(F.document)
 async def on_document(m: Message):
@@ -358,7 +374,6 @@ async def on_document(m: Message):
         await _handle_new_image(m, doc.file_id)
     else:
         await m.reply("Пришли изображение (PNG/JPG/BMP), пожалуйста.")
-
 
 @router.callback_query(F.data.startswith("adj:"))
 async def on_adjust(cb: CallbackQuery):
@@ -443,7 +458,6 @@ async def on_toggle_invert(cb: CallbackQuery):
     )
     await cb.answer("Инверсия переключена")
 
-
 @router.callback_query(F.data == "cycle:dither")
 async def on_cycle_dither(cb: CallbackQuery):
     """Циклическая смена типа дизеринга: fs → ordered → none → ..."""
@@ -468,7 +482,6 @@ async def on_cycle_dither(cb: CallbackQuery):
     )
     await cb.answer(f"Дизеринг: {st.dither}")
 
-
 @router.callback_query(F.data == "cycle:dpi")
 async def on_cycle_dpi(cb: CallbackQuery):
     """Циклическая смена DPI из набора типичных значений."""
@@ -492,14 +505,43 @@ async def on_cycle_dpi(cb: CallbackQuery):
         await cb.message.edit_reply_markup(reply_markup=kb_controls(st))
     await cb.answer(f"DPI: {st.dpi}")
 
+@router.callback_query(F.data == "cycle:outfmt")
+async def on_cycle_outfmt(cb: CallbackQuery):
+    """Цикл формата итогового файла: BMP → PNG → TIFF → ... (разрешено менять и без фото)."""
+    uid = cb.from_user.id
+    rec = state_db.get_state(uid)
+    current = (rec.get("out_format") or "bmp").lower()
+    order = ["bmp", "png", "tiff", "jpg"]
+    try:
+        new_fmt = order[(order.index(current) + 1) % len(order)]
+    except ValueError:
+        new_fmt = "bmp"
+    state_db.update_fields(uid, out_format=new_fmt)
+    # обновим UI
+    new_st = _st_from_db(state_db.get_state(uid))
+    if rec.get("last_image_bytes"):
+        img = load_image_from_bytes(rec["last_image_bytes"])
+        preview_bytes = build_preview(img, new_st)
+        await cb.message.edit_media(
+            media=InputMediaPhoto(
+                media=BufferedInputFile(preview_bytes, filename="preview.jpg"),
+                caption=build_caption(new_st),
+            ),
+            reply_markup=kb_controls(new_st),
+        )
+    else:
+        await cb.message.edit_reply_markup(reply_markup=kb_controls(new_st))
+    await cb.answer(f"Формат: {new_fmt.upper()}")
 
 @router.callback_query(F.data == "reset")
 async def on_reset(cb: CallbackQuery):
-    """Сброс параметров к значениям по умолчанию (фото сохраняем, если было)."""
+    """Сброс параметров к значениям по умолчанию (фото сохраняем, если было). Формат сохраняем."""
     uid = cb.from_user.id
     rec = state_db.get_state(uid)
     new_st = ProcState()
     new_st.last_image_bytes = rec.get("last_image_bytes")
+    # сохраняем выбранный пользователем формат при сбросе
+    new_st.out_format = cast(Literal["bmp","png","tiff"], (rec.get("out_format") or "bmp"))
     _save_to_db(uid, new_st)
     if not new_st.last_image_bytes:
         await cb.message.edit_reply_markup(reply_markup=kb_controls(new_st))
@@ -513,7 +555,6 @@ async def on_reset(cb: CallbackQuery):
         reply_markup=kb_controls(new_st),
     )
     await cb.answer("Сброшено")
-
 
 @router.callback_query(F.data.startswith("size:"))
 async def on_size(cb: CallbackQuery):
@@ -532,10 +573,9 @@ async def on_size(cb: CallbackQuery):
     stats_db.record_output(uid)
     await cb.message.reply_document(
         document=BufferedInputFile(data, filename=fname),
-        caption=f"Финал: {size}, {st.dpi} DPI, {st.dither}",
+        caption=f"Финал: {size}, {st.dpi} DPI, {st.dither}, {st.out_format.upper()}",
     )
     await cb.answer("Готово")
-
 
 @router.message(Command("stats"))
 async def on_my_stats(m: Message):

@@ -35,6 +35,12 @@ def init(db_path: str) -> None:
             last_image_bytes BLOB
         );
         """)
+        # мягкая миграция новых полей
+        try:
+            c.execute("ALTER TABLE user_state ADD COLUMN out_format TEXT NOT NULL DEFAULT 'bmp';")
+        except sqlite3.OperationalError:
+            # колонка уже добавлена ранее
+            pass
         c.commit()
 
 def ensure_user(user_id: int) -> None:
@@ -51,7 +57,7 @@ def get_state(user_id: int) -> Dict[str, Any]:
         ensure_user(user_id)
         cur = c.execute("""
             SELECT brightness, contrast, gamma, sharpness, invert, dither, dpi,
-                   denoise_size, blur_radius, last_image_bytes
+                   denoise_size, blur_radius, last_image_bytes, out_format
             FROM user_state WHERE user_id = ?;
         """, (user_id,))
         row = cur.fetchone()
@@ -67,6 +73,7 @@ def get_state(user_id: int) -> Dict[str, Any]:
             "denoise_size": int(row[7]),
             "blur_radius": float(row[8]),
             "last_image_bytes": row[9],
+            "out_format": (row[10] or "bmp"),
         }
 
 def save_state(
@@ -82,18 +89,19 @@ def save_state(
     denoise_size: int,
     blur_radius: float,
     last_image_bytes: Optional[bytes],
+    out_format: str = "bmp",
 ) -> None:
     with _conn() as c:
         c.execute("""
             UPDATE user_state
                SET brightness = ?, contrast = ?, gamma = ?, sharpness = ?,
                    invert = ?, dither = ?, dpi = ?, denoise_size = ?,
-                   blur_radius = ?, last_image_bytes = ?
+                   blur_radius = ?, last_image_bytes = ?, out_format = ?
              WHERE user_id = ?;
         """, (
             brightness, contrast, gamma, sharpness,
             1 if invert else 0, dither, dpi, denoise_size,
-            blur_radius, last_image_bytes, user_id
+            blur_radius, last_image_bytes, out_format, user_id
         ))
         c.commit()
 
